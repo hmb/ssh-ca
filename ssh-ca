@@ -1,0 +1,283 @@
+#!/bin/bash
+
+# vars regarding the script itself
+SCRIPT_PATH="${0}"
+SCRIPT_NAME="$(basename "${SCRIPT_PATH}")"
+
+# program configuration
+VERBOSE=""
+ECHO=""
+
+# working directories
+CA_BASE_DIR="ca"
+
+# program options
+OPT_INIT=0
+OPT_HELP=0
+OPT_VERBOSE=0
+
+function readOptions {
+  local option
+
+  while [[ $# -gt 0 ]]; do
+    option="${1}"
+
+    case "${option}" in
+
+    --init)
+      OPT_INIT=1
+      ;;
+
+    --help)
+      OPT_HELP=1
+      ;;
+
+    --verbose)
+      OPT_VERBOSE=1
+      ;;
+
+    -s | --ca)
+      shift
+      CA="${1}"
+      checkOption "${option}" "${CA}"
+      ;;
+
+    -I | --id)
+      shift
+      ID="${1}"
+      checkOption "${option}" "${ID}"
+      ;;
+
+    -n | --principals)
+      shift
+      PRINCIPALS="${1}"
+      checkOption "${option}" "${PRINCIPALS}"
+      ;;
+
+    --command)
+      shift
+      COMMAND="${1}"
+      checkOption "${option}" "${COMMAND}"
+      ;;
+
+    --cakey)
+      shift
+      CAKEY="${1}"
+      checkOption "${option}" "${CAKEY}"
+      ;;
+
+    --pubkey)
+      shift
+      PUBKEY="${1}"
+      checkOption "${option}" "${PUBKEY}"
+      ;;
+
+    -*)
+      echo "ERROR unknown option: ${1}"
+      echo "run '${SCRIPT_NAME} --help' for more information"
+      exit 1
+      ;;
+
+    *)
+      echo "ERROR this script does not take parameters"
+      echo "run '${SCRIPT_NAME} --help' for more information"
+      exit 1
+      ;;
+    esac
+    shift
+  done
+}
+
+function checkOption {
+  local option="${1}"
+  local value="${2}"
+
+  if [[ "${value}" == "" ]]; then
+    echo "ERROR missing value to option ${option}"
+    echo "run '${SCRIPT_NAME} --help' for more information"
+    exit 1
+  fi
+}
+
+function processGlobalOptions() {
+  if [[ ${OPT_HELP} -eq 1 ]]; then
+    # if help is given the other parameters do not matter
+    return
+  fi
+
+  if [[ ${OPT_VERBOSE} -eq 1 ]]; then
+    VERBOSE="-v"
+    ECHO="echo"
+  fi
+
+  if [[ "${CA}" == "" ]]; then
+    echo "ERROR missing CA"
+    echo "run '${SCRIPT_NAME} --help' for more information"
+    exit 1
+  fi
+}
+
+function showHelp {
+  cat <<-EOF
+	${SCRIPT_NAME} - simple bash based ssh certificate management
+
+    ${SCRIPT_NAME} --init --ca <caname> --cakey <ca private key>
+
+      Create a new certificate authority with given the private key.
+
+    ${SCRIPT_NAME} --ca <caname> --id <userid> --principals <user> --pubkey <user public key>
+
+      Sign the <user public key> by CA <caname> given the ID <userid> and the principal <user>.
+
+    ${SCRIPT_NAME} --ca <caname> --id <userid> --principals <user> --pubkey <user public key> --command <command>
+
+      Sign the <user public key> by CA <caname> given the ID <userid> and the principal <user> and restrict the user
+      to the given command.
+
+    ${SCRIPT_NAME} --help
+
+      Show this help page.
+
+  OPTIONS
+
+    --init
+
+      TODO: write
+
+    -s | --ca
+
+      TODO: write
+
+    -I | --id
+
+      TODO: write
+
+    -n | --principals
+
+      TODO: write
+
+    --command
+
+      TODO: write
+
+    --cakey
+
+      TODO: write
+
+    --pubkey
+
+      TODO: write
+
+    --verbose
+
+      Be verbose by adding more output of what is happening.
+
+    --help
+
+      With this option given, a short help page (this one) is shown. All other options or
+      parameters are ignored and not checked for consistency.
+
+	EXAMPLES
+
+    ${SCRIPT_NAME} --ca myca --id userid --principals user --pubkey user.pub
+
+      Sign the public key user.pub by myca with id userid and principals user.
+
+    ${SCRIPT_NAME} --ca myca --id userid --principals user --pubkey user.pub --command "echo test"
+
+      Sign the public key user.pub by myca with id userid and principals user and restrict the
+      user to the given command.
+EOF
+}
+
+function init() {
+  if [[ -d "${CA_DIR}" ]]; then
+    echo "ABORTING: The CA already exists"
+    exit 2
+  fi
+
+  if [[ ! -f "${CAKEY}" ]]; then
+    echo "ERROR: No CA key is given"
+    exit 2
+  fi
+
+  if [[ ! -f "${CAKEY}.pub" ]]; then
+    echo "ERROR: No CA public key is given"
+    exit 2
+  fi
+
+  mkdir -p "${CA_DIR}"
+  cp "${CAKEY}" "${CA_DIR}/cakey"
+  cp "${CAKEY}.pub" "${CA_DIR}/cakey.pub"
+  echo "0" >"${SERIAL_FILE}"
+}
+
+function createCertificate() {
+
+  if [[ ! -f "${PUBKEY}" ]]; then
+    echo "ERROR: No public key to sign is given"
+    exit 2
+  fi
+
+  PUBBASE="$(basename "${PUBKEY}" .pub)"
+  TEMPNAME="key"
+  TEMPKEY="${TEMPNAME}.pub"
+  TEMPCERT="${TEMPNAME}-cert.pub"
+
+  # copy the public key, that the cert does not overwrite an existing cert
+  cp "${PUBKEY}" "${TEMPKEY}"
+
+  SERIAL=$(($(cat "${SERIAL_FILE}") + 1))
+
+  if [[ "${COMMAND}" == "" ]]; then
+    ssh-keygen -s "${CA_DIR}/cakey" -I "${ID}" -n "${PRINCIPALS}" -z ${SERIAL} "${TEMPKEY}"
+    result=$?
+  else
+    ssh-keygen -s "${CA_DIR}/cakey" -I "${ID}" -n "${PRINCIPALS}" "-Oforce-command=${COMMAND}" -z ${SERIAL} "${TEMPKEY}"
+    result=$?
+  fi
+
+  if [[ "${result}" -eq 0 ]]; then
+
+    echo "The certificate has been generated:"
+    ssh-keygen -L -f "${TEMPCERT}"
+    IFS= read -r -p "Commit? [y/n]: " COMMIT
+
+    if [[ "${COMMIT}" == "y" ]]; then
+      mv "${TEMPCERT}" "${PUBBASE}-${ID}-cert.pub"
+      echo "${SERIAL}" >"${SERIAL_FILE}"
+      echo "committed cert # ${SERIAL}"
+    else
+      rm "${TEMPCERT}"
+    fi
+
+  fi
+
+  rm ${TEMPKEY}
+}
+
+# ---------------------------------------------------------------------
+# main script
+
+readOptions "$@"
+processGlobalOptions
+
+if [[ ${OPT_HELP} -eq 1 ]]; then
+  showHelp
+  exit 0
+fi
+
+CA_DIR="${CA_BASE_DIR}/${CA}"
+SERIAL_FILE="${CA_DIR}/serial"
+
+if [[ ${OPT_INIT} -eq 1 ]]; then
+  init
+  exit 0
+fi
+
+if [[ ! -d "${CA_DIR}" ]]; then
+  echo "ERROR: The CA does not exists"
+  exit 2
+fi
+
+createCertificate
